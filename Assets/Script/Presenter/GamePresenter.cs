@@ -3,126 +3,121 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
+using UnityEditor;
 using UnityEngine;
 
-public class GamePresenter : SingletonBehaviour<GamePresenter>
+public class GamePresenter : MonoBehaviour, IDisposable
 {
-    CubeGenerator _cubeGenerator;
+    GameSceneInfo _info;
+
     ProblemModel _problemModel;
     LifeModel _lifeModel;
 
-    GameView _gameView => GameView.Instance;
+    [SerializeField] GameView _gameView;
 
     [Header("Properties")]
-    [SerializeField] Transform CubeOriginPos;
-    [SerializeField] GameObject CubePrefab;
+    [SerializeField] LifeScriptableObject _lifeSO;
     [SerializeField] float RotateSpeed = 3f;
-    [SerializeField] int MaximumLife = 100;
-    [Range(3, 5)] [SerializeField] int size = 3;
-    [Tooltip("1 ~ size^3 À¸·Î ClampµÊ")]
+    [Range(3, 5)][SerializeField] int size = 3;
+    [Tooltip("Å¥ºê »ý¼º °¹¼ö\n1 ~ size^3 À¸·Î ClampµÊ")]
     [SerializeField] int numOfDepth = 5;
-
+    [SerializeField] int CubeRegenCycle = 3;
     [Space(10)]
-    [Header("Mesh Filters")]
-    [SerializeField] MeshFilter problemMeshFilter;
-    [SerializeField] MeshFilter projectionMeshFilter;
+    [SerializeField] bool isPaused = false;
 
-    public event Action<bool> OnJudge;
     public event Action<int, int> OnLifeChange;
     public event Action OnTickChanged;
 
     CubeInfo cubeInfo;
-    GameObject cubeGameObject;
     Queue<AxisDir> rotQueue = new();
-
     float totalGameTime = 0;
-    [SerializeField] bool isPaused = false;
+    int CurCubeCycle = 0;
 
     CancellationTokenSource g_cts;
-    private void Start()
+    public void Init(GameSceneInfo info)
     {
-        _lifeModel = new LifeModel(MaximumLife);
-        _problemModel = new ProblemModel();
-        _cubeGenerator = new CubeGenerator(CubePrefab);
+        size = info.cubeSize;
 
-        OnJudge += _problemModel.ProcessJudge;
-        OnJudge += _lifeModel.ProcessJudge;
-        
-        _lifeModel.OnLifeChanged += _gameView.SetLife;
-        _lifeModel.OnLifeChanged += OnLifeEnd;
+        _problemModel = new ProblemModel();
+
+        _gameView.RetryButton.onClick.RemoveAllListeners();
+        _gameView.HomeButton.onClick.RemoveAllListeners();
+
+        _gameView.RetryButton.onClick.AddListener(StartGameCycle);
+        _gameView.RetryButton.onClick.AddListener(() => SoundManager.PlayEffect("click"));
+        _gameView.HomeButton.onClick.AddListener(MoveToHome);
+        _gameView.HomeButton.onClick.AddListener(() => SoundManager.PlayEffect("click"));
+
+        StartGameCycle();
+    }
+
+    public void StartGameCycle()
+    {
+        g_cts = new CancellationTokenSource();
 
         _problemModel.OnScoreChanged += _gameView.SetScore;
 
-        _gameView.RetryButton.onClick.AddListener(StartGameCycle);
-        _gameView.HomeButton.onClick.AddListener(MoveToHome);
+        _lifeModel = new LifeModel(_lifeSO ??= new LifeScriptableObject().Default());
+        _lifeModel.OnLifeChanged += _gameView.SetLife;
+        _lifeModel.OnLifeExhausted += LifeEnd;
 
-        _gameView.SetMaxLife(_lifeModel.MaxLife);
-    }
-
-    [ContextMenu("Start Game Cycle")]
-    public void StartGameCycle()
-    {
-        _gameView.SetGame(false);
-
-        g_cts = new CancellationTokenSource();
-
-        cubeInfo = _cubeGenerator.GenerateCube(size, numOfDepth);
-        _problemModel.Init(cubeInfo);
-
-        //problemMeshFilter.transform.position = -new Vector3(1, 0, 1) * ((float)cubeInfo.size / 2);
-        //projectionMeshFilter.transform.position = -new Vector3(1, 0, 1) * ((float)cubeInfo.size / 2);
-
-        cubeGameObject = _cubeGenerator.GenerateCubeGameObject(cubeInfo);
-        cubeGameObject.transform.position = CubeOriginPos.position;
-
+        _gameView.Init(_lifeModel.MaxLife);
         _gameView.CaptureButton.onClick.AddListener(JudgeAnswer);
+        _gameView.CaptureButton.onClick.AddListener(() => SoundManager.PlayEffect("click"));
+
+        totalGameTime = 0;
+        CurCubeCycle = 0;
 
         InputHandler.Instance.OnDragEnd += OnDragInput;
 
+        GenerateCubeInfo();
         SetNextProblem();
-        projectionMeshFilter.mesh = MeshHandler.GetMeshFromQuadPoints(cubeInfo.SideProjectionSet());
 
-        OnTickChanged += DecreaseLife;
+        OnTickChanged = DecreaseLife;
 
         SerialRotation().Forget();
         Tick().Forget();
     }
 
-    [ContextMenu("End Game Cycle")]
     public void DisposeGameCycle()
     {
+        //Debug.Log("DISPOSED");
         g_cts?.Cancel();
 
-        _lifeModel.Reset();
         _problemModel.Reset();
+        _gameView.Reset();
+        _lifeModel.Reset();
 
         rotQueue.Clear();
-        totalGameTime = 0;
-        problemMeshFilter.mesh = null;
-        projectionMeshFilter.mesh = null;
 
-        _gameView.CaptureButton.onClick.RemoveAllListeners();
-
-        OnTickChanged -= DecreaseLife;
-        InputHandler.Instance.OnDragEnd -= OnDragInput;
-
-        Destroy(cubeGameObject);
+        InputHandler.Instance.ResetHandler();
     }
 
-    public void OnDragInput(Vector2 st, Vector2 ed) => rotQueue.Enqueue(DetermineAxisDir(st, ed));
+    private void GenerateCubeInfo()
+    {
+        CurCubeCycle = 0;
+        cubeInfo = new CubeInfo(size, numOfDepth);
+        _problemModel.Init(cubeInfo);
+        _gameView.SetViewWithCubeInfo(cubeInfo);
+    }
 
+    public void OnDragInput(Vector2 st, Vector2 ed)
+    {
+        SoundManager.PlayEffect("swipe");
+        rotQueue.Enqueue(DetermineAxisDir(st, ed));
+    }
     public void SetNextProblem()
     {
-        _problemModel.GenerateNextProblem();
-        problemMeshFilter.mesh = _problemModel.GetProblemMesh();
+        if (cubeInfo == null) return;
+        _problemModel.GenerateNextProblem(cubeInfo.phaseNode);
+        _gameView.ProblemMeshFilter.mesh = _problemModel.GetProblemMesh();
     }
 
-    public void OnLifeEnd(float _life)
+    public void LifeEnd()
     {
-        if (_life > 0) return;
-
-        _gameView.SetGame(true);
+        SoundManager.PlayEffect("clear");
         _gameView.SetEndGameRect(_problemModel.CurScore);
+        TryUpdateScore(_problemModel.CurScore, size).Forget();
         DisposeGameCycle();
     }
 
@@ -134,31 +129,35 @@ public class GamePresenter : SingletonBehaviour<GamePresenter>
     public void JudgeAnswer()
     {
         var res = _problemModel.IsCorrect(cubeInfo);
-        OnJudge?.Invoke(res);
 
+        if(res)
+        {
+            SoundManager.PlayEffect("success");
+        }
+        else
+        {
+            SoundManager.PlayEffect("wrong");
+        }
+
+        _problemModel.ProcessJudge(res);
+        _lifeModel.ProcessJudge(res);
+
+        if(_lifeModel.Life <= 0)
+        {
+            return;
+        }
+
+        UpdateCubeCycle();
         SetNextProblem();
     }
 
     public void MoveToHome()
     {
-        Debug.Log("Move to Home");
+        Debug.Log("MoveToHome");
+        GameManager.Instance.ReturnHome();
     }
 
-    private async UniTask RotateCubeObject(AxisDir dir)
-    {
-        Quaternion fromRotation = cubeGameObject.transform.rotation;
-
-        var axisValue = Util.AxisDirToValue(dir);
-        float time = 0f;
-        while(time * RotateSpeed < 1f)
-        {
-            time += Time.deltaTime;
-            cubeGameObject.transform.Rotate(axisValue, 90 * Time.deltaTime * RotateSpeed, Space.World);
-            await UniTask.NextFrame(cancellationToken : g_cts.Token);
-        }
-        cubeGameObject.transform.rotation = fromRotation * Quaternion.Inverse(fromRotation) * Quaternion.Euler(axisValue * 90f) * fromRotation;
-        projectionMeshFilter.mesh = MeshHandler.GetMeshFromQuadPoints(cubeInfo.SideProjectionSet());
-    }
+    private UniTaskVoid TryUpdateScore(int score, int diff) => NetworkManager.Instance.TryUpdateUserScore(NetworkManager.Instance.g_UID, diff, score);
 
     private async UniTask SerialRotation()
     {
@@ -169,7 +168,8 @@ public class GamePresenter : SingletonBehaviour<GamePresenter>
             if(rotQueue.TryDequeue(out var res))
             {
                 cubeInfo.RotateCube(res);
-                await RotateCubeObject(res);
+                await _gameView.RotateCubeObject(res, RotateSpeed, g_cts);
+                _gameView.ProjectionMeshFilter.mesh = MeshHandler.GetMeshFromQuadPoints(cubeInfo.SideProjectionSet());
             }
         }
     }
@@ -203,4 +203,41 @@ public class GamePresenter : SingletonBehaviour<GamePresenter>
         }
         return diff.y > 0 ? AxisDir.posX : AxisDir.negX;        
     }
+
+    private void UpdateCubeCycle()
+    {
+        CurCubeCycle += 1;
+        if (CurCubeCycle < CubeRegenCycle) return;
+
+        GenerateCubeInfo();
+    }
+
+    public void Dispose()
+    {
+        
+    }
 }
+
+#if UNITY_EDITOR
+[CustomEditor(typeof(GamePresenter))]
+public class GamePresenterEditor : Editor 
+{
+    public override void OnInspectorGUI()
+    {
+        DrawDefaultInspector();
+        GamePresenter gamePresenter = (GamePresenter)target;
+
+        GUILayout.Space(10);
+
+        if(GUILayout.Button("Start Game Cycle"))
+        {
+            gamePresenter.StartGameCycle();
+        }
+
+        if (GUILayout.Button("Dispose Game Cycle"))
+        {
+            gamePresenter.DisposeGameCycle();
+        }
+    }
+}
+#endif

@@ -6,7 +6,10 @@ using System;
 public class LifeModel
 {
     public event Action<float> OnLifeChanged;
+    public event Action OnLifeExhausted;
     public event Action<int> OnMaxLifeChanged;
+
+    private LifeScriptableObject lifeSO;
 
     private float life;
     public float Life 
@@ -15,6 +18,10 @@ public class LifeModel
         set
         {
             life = Mathf.Clamp(value, 0, MaxLife);
+            if (life <= 0)
+            {
+                OnLifeExhausted?.Invoke();
+            }
             OnLifeChanged?.Invoke(life);
         }
     }
@@ -30,32 +37,44 @@ public class LifeModel
         }
     }
 
-    public LifeModel() : this(10000) { }
-    public LifeModel(int _mL)
+    public LifeModel() : this(ScriptableObject.CreateInstance<LifeScriptableObject>().Default()) { }
+    public LifeModel(LifeScriptableObject _lifeSO)
     {
-        maxLife = _mL;
+        lifeSO = _lifeSO;
+        maxLife = _lifeSO.MaxLife;
         life = maxLife;
     }
 
     public void Reset()
     {
-        Life = MaxLife;
+        OnLifeChanged = null;
+        OnLifeExhausted = null;
+        OnMaxLifeChanged = null;
     }
-
-    public float GetDecreaseRate(float time)
+    public float GetDecreaseRate(float elapsed)
     {
-        return 2f;
+        int cumulativeTime = 0;
+        for (int i = 0; i < lifeSO.LifeDecreaseRateCurveList.Count; i++)
+        {
+            var curEntry = lifeSO.LifeDecreaseRateCurveList[i];
+            if (elapsed < cumulativeTime + curEntry.Duration)
+            {
+                return  (curEntry.EndPointValue - curEntry.StartPointValue) * curEntry.Curve.Evaluate((elapsed - cumulativeTime) / curEntry.Duration) + curEntry.StartPointValue;
+            }
+            cumulativeTime += curEntry.Duration;
+        }
+        return lifeSO.LifeDecreaseRateCurveList[lifeSO.LifeDecreaseRateCurveList.Count - 1].EndPointValue;
     }
 
     public void ProcessJudge(bool IsCorrect)
     {
         if(IsCorrect)
         {
-            Life += 10;
+            Life += lifeSO.OnSuccessGain;
         }
         else
         {
-            Life -= 10;
+            Life -= lifeSO.OnFailDecrease;
         }
     }
 }

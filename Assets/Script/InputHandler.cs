@@ -4,16 +4,25 @@ using UnityEngine.EventSystems;
 
 public class InputHandler : SingletonBehaviour<InputHandler>
 {
-    [SerializeField] private float dragSensitivity = 10f;
+    [SerializeField] private float dragSensitivity = 50f;
 
     private Vector2 startPosition;
     private Vector2 endPosition;
 
     public event Action<Vector2, Vector2> OnDragEnd;
+    public event Action<Vector2> OnTouchEnd;
+
+    private bool isTouchStartFromUI = false;
 
     private void Update()
     {
         HandleInput();
+    }
+
+    public void ResetHandler()
+    {
+        OnDragEnd = null;
+        OnTouchEnd = null;
     }
 
     private void HandleInput()
@@ -32,6 +41,10 @@ public class InputHandler : SingletonBehaviour<InputHandler>
             {
                 OnDragEnd?.Invoke(startPosition, endPosition);
             }
+            else
+            {
+                OnTouchEnd?.Invoke(endPosition);
+            }
         }
 #endif
 #if UNITY_ANDROID
@@ -41,18 +54,35 @@ public class InputHandler : SingletonBehaviour<InputHandler>
 
             if (touch.phase == TouchPhase.Began)
             {
+                if (IsTouchOverUI(touch)) isTouchStartFromUI = true;
                 startPosition = touch.position;
             }
-
-            if (!EventSystem.current.IsPointerOverGameObject() && touch.phase == TouchPhase.Ended)
+            else if (touch.phase == TouchPhase.Ended)
             {
                 endPosition = touch.position;
-                if((startPosition - endPosition).sqrMagnitude >= dragSensitivity)
+                if(!isTouchStartFromUI)
                 {
-                    OnDragEnd?.Invoke(startPosition, endPosition);
+                    if ((startPosition - endPosition).sqrMagnitude >= dragSensitivity)
+                    {
+                        OnDragEnd?.Invoke(startPosition, endPosition);
+                    }
+                    else
+                    {
+                        OnTouchEnd?.Invoke(endPosition);
+                    }
                 }
+                isTouchStartFromUI = false;
             }
         }
 #endif
     }
+        
+    private bool IsTouchOverUI(Touch touch)
+    {
+        if (EventSystem.current == null)
+            return false;
+
+        return EventSystem.current.IsPointerOverGameObject(touch.fingerId);
+    }
+
 }

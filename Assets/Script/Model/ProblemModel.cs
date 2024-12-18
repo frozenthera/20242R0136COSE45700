@@ -12,7 +12,7 @@ public class ProblemModel
     private int cubeSize;
 
     private int curProblemIdx;
-    private List<uint> problems;
+    private uint[] problems;
 
     public Action<int> OnScoreChanged;
     private int curScore = 0;
@@ -26,8 +26,8 @@ public class ProblemModel
         }
     }
 
-    public uint CurProblem => problems[curProblemIdx];
-    public ProblemModel(int minDepth = 1, int maxDepth = 5)
+    public uint CurProblem { get; private set; }
+    public ProblemModel(int minDepth = 1, int maxDepth = 3)
     {
         this.minDepth = minDepth;
         this.maxDepth = maxDepth;
@@ -43,12 +43,15 @@ public class ProblemModel
     {
         CurScore = 0;
         curProblemIdx = -1;
+        CurProblem = 0;
     }
 
     readonly AxisDir[] TraverseOrder = {AxisDir.none, AxisDir.posZ, AxisDir.posX, AxisDir.posX, AxisDir.posX, AxisDir.posZ };
+    private Dictionary<uint, List<int>> phaseDict;
     public void GenerateProjection(CubeInfo cube)
     {
-        problems = new List<uint>();
+        problems = new uint[24];
+        phaseDict = new();
 
         var cur = cube;
         foreach (var axis in TraverseOrder)
@@ -56,7 +59,14 @@ public class ProblemModel
             cur.RotateCube(axis);
             for (int i = 0; i < 4; i++)
             {
-                problems.Add(cur.SideProjectionUint());
+                uint phase = cur.SideProjectionUint();
+                if(!phaseDict.ContainsKey(phase))
+                {
+                    phaseDict[phase] = new List<int>();
+                }
+                phaseDict[phase].Add(cube.phaseNode);
+                problems[cube.phaseNode] = phase;
+
                 cur.RotateCube(AxisDir.posY);
             }
         }       
@@ -81,10 +91,12 @@ public class ProblemModel
 
 
     private int[][] depthGraph;
+    private List<(int, uint)>[] depthDict;
     private void ConstructDepthGraph()
     {
         depthGraph = new int[24][];
-        
+        depthDict = new List<(int, uint)>[24];
+
         for(int i = 0; i < 24; ++i)
         {
             depthGraph[i] = new int[24];
@@ -113,39 +125,87 @@ public class ProblemModel
                 }
             }
         }
-    }
 
-    public void GenerateNextProblem()
-    {
-        curProblemIdx = GetNextProblemIdx();
-    }
-
-    private int GetNextProblemIdx(int depth = 0)
-    {
-        Debug.Log($"Current node : {curProblemIdx}");
-        if(depth == 0 && curProblemIdx != -1)
+        for(int i = 0; i < 24; i++)
         {
-            var candidates = new List<int>();
-            
-            for(int i = 0; i < 24; ++i)
-            {
-                if (minDepth <= depthGraph[curProblemIdx][i] && depthGraph[curProblemIdx][i] <= maxDepth)
-                {
-                    candidates.Add(i);
-                    //Debug.Log($"{i} : Phase : {Convert.ToString(problems[i], 2)}");
-                }   
-            }
-            int randIdx = Random.Range(0, candidates.Count);
-            Debug.Log($"Next node : {candidates[randIdx]} Depth : {depthGraph[curProblemIdx][candidates[randIdx]]}");
-            Debug.Log($"FLAG {Convert.ToString(problems[candidates[randIdx]], 2)}");
-            return candidates[randIdx];
+            depthGraph[i][i] = 999;
         }
-        return Random.Range(0, 24);
+
+        for(int i = 0; i < 24; i++)
+        {
+            depthDict[i] = new();
+            foreach (var pair in phaseDict)
+            {
+                uint phase = pair.Key;
+                List<int> candidate = pair.Value;
+
+                if (phase == problems[i]) continue;
+
+                int minDist = 999;
+                foreach(var item in candidate)
+                {
+                    minDist = Mathf.Min(minDist, depthGraph[i][item]);
+                }
+                depthDict[i].Add((minDist, phase));
+            }
+            depthDict[i].Sort();
+        }
+    }
+
+    public void GenerateNextProblem(int prob_idx)
+    {
+        curProblemIdx = prob_idx;
+        CurProblem = GetNextProblem();
+    }
+
+    int BinarySearchTuple(List<(int, uint)> list, int target)
+    {
+        int left = 0;
+        int right = list.Count - 1;
+        int resultIndex = list.Count;
+
+        while (left <= right)
+        {
+            int mid = left + (right - left) / 2;
+
+            if (list[mid].Item1 == target)
+            {
+                resultIndex = mid;
+                right = mid - 1;
+            }
+            else if (list[mid].Item1 < target)
+            {
+                left = mid + 1;
+            }
+            else
+            {
+                right = mid - 1;
+            }
+        }
+        return resultIndex;
+    }
+
+    private uint GetNextProblem()
+    {
+        //Debug.Log($"Current node : {curProblemIdx}");
+        if(curProblemIdx != -1)
+        {
+            //Debug.Log($"{Convert.ToString(problems[curProblemIdx], 2)}");
+            int st = BinarySearchTuple(depthDict[curProblemIdx], minDepth);
+            int ed = BinarySearchTuple(depthDict[curProblemIdx], maxDepth + 1);
+
+            int randIdx = Random.Range(st, ed);
+
+            //Debug.Log($"start : {st}  end : {ed} rand : {randIdx} / {depthDict[curProblemIdx][randIdx].Item1}" +
+                //$"{Convert.ToString(depthDict[curProblemIdx][randIdx].Item2, 2)} ");
+            return depthDict[curProblemIdx][randIdx].Item2;
+        }
+        return problems[Random.Range(0, 24)];
     }
 
     public bool IsCorrect(CubeInfo cube)
     {
-        return (cube.SideProjectionUint() ^ problems[curProblemIdx]) == 0;
+        return (problems[cube.phaseNode] ^ CurProblem) == 0;
     }
 
     public void ProcessJudge(bool isCorrect)
@@ -161,7 +221,7 @@ public class ProblemModel
         return 5;
     }
 
-    public Mesh GetProblemMesh() => MeshHandler.GetMeshFromQuadPoints(BitmaskToVec2Int(CurProblem, cubeSize));
+    public Mesh GetProblemMesh() => MeshHandler.GetOutlineMeshFromQuadPoints(BitmaskToVec2Int(CurProblem, cubeSize));
 
     public static List<Vector2Int> BitmaskToVec2Int(uint flag, int size)
     {
